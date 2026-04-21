@@ -14,7 +14,7 @@ Tampermonkey ist eine Browser-Erweiterung, die Userscripts ausführt. Sie wird w
 
 ### Schritt 2: Erweiterungs-Entwicklermodus aktivieren (nur Chrome/Edge/Brave)
 
-Seit Ende 2024 verlangt Chrome für Userscript-Extensions, dass der *Entwicklermodus für Erweiterungen* aktiv ist. Das ist **nicht** der gleiche Modus wie die Chrome-DevTools (F12) und hat keinerlei Auswirkungen auf die Browser-Sicherheit.
+Seit Ende 2024 verlangt Chrome für Userscript-Extensions, dass der *Entwicklermodus für Erweiterungen* aktiv ist.
 
 1. In der Adresszeile eingeben: `chrome://extensions`  *(bei Edge: `edge://extensions`)*
 2. Oben rechts den Schalter **"Entwicklermodus"** auf **An** stellen
@@ -59,11 +59,8 @@ Neue Versionen werden **automatisch** installiert. Tampermonkey prüft alle 24 S
 **"Diese Erweiterung funktioniert möglicherweise nicht mehr" in Chrome**
 → Schritt 2 durchführen (Entwicklermodus für Erweiterungen aktivieren).
 
-**Schalter in `chrome://extensions` ist ausgegraut**
-→ Firmen-IT hat ihn gesperrt, bei der IT melden.
-
 ---
 
 ## Bei Problemen
 
-Bei Fragen oder Fehlern: [Issue erstellen](https://github.com/BAHendrik/tms_tools/issues) oder direkt bei Hendrik melden.
+Bei Fragen oder Fehlern: [Issue erstellen](https://github.com/BAHendrik/tms_tools/issues)
