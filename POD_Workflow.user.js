@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         Sirum: POD Workflow
-// @namespace    http://tampermonkey.net/
-// @version      12.6
+// @namespace    https://github.com/BAHendrik/tms_tools
+// @version      12.8
 // @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige.
 // @author       Hendrik
 // @match        https://coolerulogistics-production-00220.dolphins.sirum.de/*
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/BAHendrik/tms_tools/main/POD_Workflow.user.js
+// @downloadURL  https://raw.githubusercontent.com/BAHendrik/tms_tools/main/POD_Workflow.user.js
+// @supportURL   https://github.com/BAHendrik/tms_tools/issues
 // ==/UserScript==
 
 (function() {
