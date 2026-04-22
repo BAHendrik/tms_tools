@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sirum: POD Workflow & Quick Tag
 // @namespace    https://github.com/BAHendrik/tms_tools
-// @version      13.1
+// @version      13.2
 // @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige + klickbare Transport-Badges
 // @author       BAHendrik
 // @match        https://coolerulogistics-production-00220.dolphins.sirum.de/*
