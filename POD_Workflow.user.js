@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Sirum: POD Workflow
+// @name         Sirum: POD Workflow & Quick Tag
 // @namespace    https://github.com/BAHendrik/tms_tools
-// @version      12.8
-// @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige.
-// @author       Hendrik
+// @version      13.1
+// @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige + klickbare Transport-Badges (native Odoo-Modale via do_action).
+// @author       BAHendrik
 // @match        https://coolerulogistics-production-00220.dolphins.sirum.de/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/BAHendrik/tms_tools/main/POD_Workflow.user.js
@@ -112,6 +112,49 @@
 
         @keyframes spin { 100% { transform: rotate(360deg); } }
         .fa-spin-fast { animation: spin 1s linear infinite; }
+
+        /* NEU: Transport-Nummer-Badge */
+        .tms-transport-badge {
+            display: inline-flex; align-items: center;
+            background: linear-gradient(135deg, #4e73df 0%, #224abe 100%);
+            color: #ffffff !important;
+            padding: 3px 9px 3px 8px;
+            border-radius: 6px;
+            font-size: 0.82em;
+            font-weight: 600;
+            font-family: 'SFMono-Regular', 'Menlo', 'Consolas', monospace;
+            letter-spacing: 0.3px;
+            cursor: pointer;
+            border: 1px solid #224abe;
+            box-shadow: 0 1px 3px rgba(34, 74, 190, 0.3);
+            transition: all 0.15s ease-in-out;
+            text-decoration: none !important;
+            white-space: nowrap;
+            margin-right: 4px;
+        }
+        .tms-transport-badge:hover {
+            background: linear-gradient(135deg, #5a85ec 0%, #2d5cd4 100%);
+            color: #ffffff !important;
+            box-shadow: 0 3px 8px rgba(34, 74, 190, 0.5);
+            transform: translateY(-1px);
+            text-decoration: none !important;
+        }
+        .tms-transport-badge:active { transform: translateY(0); }
+        .tms-transport-badge i { margin-right: 5px; font-size: 0.95em; opacity: 0.9; }
+        .tms-transport-badge.is-loading { opacity: 0.6; cursor: wait; pointer-events: none; }
+        .tms-transport-status {
+            font-size: 0.85em;
+            font-weight: 500;
+            margin-left: 2px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            background: rgba(0,0,0,0.05);
+            color: #6c757d;
+            vertical-align: middle;
+        }
+        .tms-transport-status.state-done { background: rgba(40, 167, 69, 0.12); color: #1e7e34; }
+        .tms-transport-status.state-running { background: rgba(243, 156, 18, 0.15); color: #c97a00; }
+        .tms-transport-status.state-error { background: rgba(231, 74, 59, 0.15); color: #c0392b; }
 
         /* Preview Modal */
         #sirum-pdf-modal {
@@ -1172,6 +1215,201 @@
     }
 
     // --- MAIN OBSERVER LOGIC ---
+    // --- NEU: TRANSPORT-NUMMER ALS KLICKBARES BADGE ---
+    // Parst "T26017780 : done\nT26017781 : running" in Array von {number, state}
+    function parseTransportStates(text) {
+        if (!text) return [];
+        const results = [];
+        text.split('\n').forEach(line => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            const m = trimmed.match(/^(T\d+)\s*:\s*(.+?)$/);
+            if (m) results.push({ number: m[1], state: m[2].trim() });
+        });
+        return results;
+    }
+
+    // Holt die internen IDs für eine Liste von Transport-Nummern
+    async function fetchTransportIds(transportNumbers) {
+        if (transportNumbers.length === 0) return {};
+        try {
+            const res = await fetch('/web/dataset/search_read', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jsonrpc: "2.0", method: "call",
+                    params: {
+                        model: "tms.transport",
+                        domain: [["number", "in", transportNumbers]],
+                        fields: ["id", "number"]
+                    }
+                })
+            });
+            const data = await res.json();
+            const map = {};
+            if (data.result && data.result.records) {
+                data.result.records.forEach(r => { map[r.number] = r.id; });
+            }
+            return map;
+        } catch (err) {
+            console.error('fetchTransportIds fehlgeschlagen:', err);
+            return {};
+        }
+    }
+
+    // Öffnet den Transport-Record als Modal über Odoos internen Action-Manager
+    function openTransportModal(transportId) {
+        try {
+            const odoo = window.odoo;
+            if (!odoo || !odoo.__DEBUG__ || !odoo.__DEBUG__.services) {
+                console.warn('Odoo-Services nicht erreichbar, fallback auf URL-Navigation');
+                window.location.href = `/web#id=${transportId}&model=tms.transport&view_type=form`;
+                return;
+            }
+            const services = odoo.__DEBUG__.services;
+
+            // Action-Methode finden - Odoo v11 nutzt do_action (mit Unterstrich),
+            // neuere Versionen doAction. Wir probieren beide Varianten durch.
+            const candidateKeys = [
+                'web.web_client',
+                'window_manager.action_manager',
+                'web.action_manager',
+                'web.ActionManager'
+            ];
+
+            let actionTarget = null;
+            let actionMethod = null;
+
+            for (const key of candidateKeys) {
+                const svc = services[key];
+                if (!svc) continue;
+                // Prüfe do_action (v11-Style) und doAction (neuere Versionen)
+                // direkt auf dem Service
+                if (typeof svc.do_action === 'function') {
+                    actionTarget = svc;
+                    actionMethod = 'do_action';
+                    break;
+                }
+                if (typeof svc.doAction === 'function') {
+                    actionTarget = svc;
+                    actionMethod = 'doAction';
+                    break;
+                }
+                // Prüfe auch geschachtelt in .action_manager
+                if (svc.action_manager) {
+                    if (typeof svc.action_manager.do_action === 'function') {
+                        actionTarget = svc.action_manager;
+                        actionMethod = 'do_action';
+                        break;
+                    }
+                    if (typeof svc.action_manager.doAction === 'function') {
+                        actionTarget = svc.action_manager;
+                        actionMethod = 'doAction';
+                        break;
+                    }
+                }
+            }
+
+            if (actionTarget && actionMethod) {
+                actionTarget[actionMethod]({
+                    type: 'ir.actions.act_window',
+                    res_model: 'tms.transport',
+                    res_id: transportId,
+                    views: [[false, 'form']],
+                    target: 'new',    // 'new' = Modal-Dialog
+                    context: {}
+                });
+                return;
+            }
+
+            console.warn('Action-Manager nicht gefunden, fallback auf URL-Navigation');
+            window.location.href = `/web#id=${transportId}&model=tms.transport&view_type=form`;
+        } catch (err) {
+            console.error('openTransportModal fehlgeschlagen:', err);
+            window.location.href = `/web#id=${transportId}&model=tms.transport&view_type=form`;
+        }
+    }
+
+    // Wandelt "T26017780 : done" in klickbares Badge + farbigen Status-Text
+    function renderTransportBadge(transportNumber, state, transportId) {
+        const link = document.createElement('a');
+        link.className = 'tms-transport-badge';
+        if (transportId) {
+            // href als Fallback (z.B. für Middle-Click = neuer Tab), aber normaler Klick fängt's ab
+            link.href = `/web#id=${transportId}&model=tms.transport&view_type=form`;
+            link.title = `Transport ${transportNumber} öffnen`;
+        } else {
+            link.className += ' is-loading';
+            link.title = 'Transport-ID wird geladen...';
+            link.href = '#';
+        }
+        link.innerHTML = `<i class="fa fa-truck"></i>${transportNumber}`;
+
+        link.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!transportId) { e.preventDefault(); return; }
+            // Middle-Click / Ctrl-Click weiterhin als normaler Link (neuer Tab)
+            if (e.button === 1 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+            e.preventDefault();
+            openTransportModal(transportId);
+        });
+
+        const statusSpan = document.createElement('span');
+        statusSpan.className = 'tms-transport-status';
+        const stateLower = (state || '').toLowerCase();
+        if (stateLower === 'done') statusSpan.classList.add('state-done');
+        else if (stateLower === 'running' || stateLower === 'in_progress') statusSpan.classList.add('state-running');
+        else if (stateLower === 'error' || stateLower === 'exception') statusSpan.classList.add('state-error');
+        statusSpan.innerText = state || '';
+
+        const wrapper = document.createElement('span');
+        wrapper.className = 'tms-transport-wrapper';
+        wrapper.appendChild(link);
+        wrapper.appendChild(statusSpan);
+        return wrapper;
+    }
+
+    // Verarbeitet alle transport_states-Zellen: ersetzt Text durch Badges
+    let isFetchingTransports = false;
+    async function processTransportBadges() {
+        if (isFetchingTransports) return;
+        const cells = document.querySelectorAll('span[name="transport_states"]:not(.tms-transport-processed)');
+        if (cells.length === 0) return;
+
+        isFetchingTransports = true;
+        try {
+            // Schritt 1: Alle Zellen parsen, Nummern sammeln
+            const cellData = [];
+            const allNumbers = new Set();
+
+            cells.forEach(cell => {
+                const transports = parseTransportStates(cell.innerText);
+                if (transports.length > 0) {
+                    cellData.push({ cell, transports });
+                    transports.forEach(t => allNumbers.add(t.number));
+                }
+                cell.classList.add('tms-transport-processed');
+            });
+
+            if (cellData.length === 0) { isFetchingTransports = false; return; }
+
+            // Schritt 2: Alle Transport-IDs in einem Batch-Request holen
+            const idMap = await fetchTransportIds([...allNumbers]);
+
+            // Schritt 3: Jede Zelle neu befüllen
+            cellData.forEach(({ cell, transports }) => {
+                cell.innerHTML = '';
+                transports.forEach((t, idx) => {
+                    const badge = renderTransportBadge(t.number, t.state, idMap[t.number]);
+                    cell.appendChild(badge);
+                    if (idx < transports.length - 1) cell.appendChild(document.createElement('br'));
+                });
+            });
+        } catch (err) {
+            console.error('processTransportBadges fehlgeschlagen:', err);
+        }
+        isFetchingTransports = false;
+    }
+
     async function processRows() {
         if (isFetchingTable) return;
         const rows = document.querySelectorAll('tr.o_data_row:not(.attachment-processed)');
@@ -1268,6 +1506,7 @@
         timeout = setTimeout(() => {
             processRows();
             processModal();
+            processTransportBadges();
         }, 150);
     });
 
@@ -1276,6 +1515,7 @@
         observer.observe(target, { childList: true, subtree: true });
         processRows();
         processModal();
+        processTransportBadges();
     };
 
     if (document.readyState === 'complete') start();
