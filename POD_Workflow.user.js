@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sirum: POD Workflow & Quick Tag
 // @namespace    https://github.com/BAHendrik/tms_tools
-// @version      13.2
-// @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige + klickbare Transport-Badges
+// @version      13.4
+// @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige + klickbare Transport-Badges (native Odoo-Modale via do_action).
 // @author       BAHendrik
 // @match        https://coolerulogistics-production-00220.dolphins.sirum.de/*
 // @grant        none
@@ -209,6 +209,14 @@
             font-weight: bold; flex-shrink: 0;
         }
         .sirum-toast .sirum-toast-close:hover { color: #ffffff; }
+
+        /* NEU: Drag & Drop Feedback */
+        .tms-drag-over {
+            background-color: rgba(40, 167, 69, 0.08) !important;
+            outline: 2px dashed #28a745 !important;
+            outline-offset: -2px;
+            transition: all 0.2s ease;
+        }
     `;
     document.head.appendChild(styleSheet);
 
@@ -963,6 +971,91 @@
 
 
     // --- EVENT HANDLER ---
+
+    // --- NEU: DRAG & DROP LOGIK ---
+    async function handleDragAndDropUpload(files, docNo, realId, attachments, badgeEl) {
+        if (!realId) {
+            showToast(`Kann keine Dateien hochladen: Auftrags-ID für <b>${docNo}</b> fehlt.`, { type: 'error' });
+            return;
+        }
+
+        const originalBadgeHtml = badgeEl.innerHTML;
+        const originalBadgeClass = badgeEl.className;
+        badgeEl.className = 'tms-attachment-badge is-uploading';
+        badgeEl.innerHTML = `<i class="fa fa-cloud-upload fa-spin-fast"></i> Lade...`;
+
+        let successCount = 0;
+
+        for (const file of files) {
+            const formData = new FormData();
+            formData.append('csrf_token', getCSRFToken());
+            formData.append('callback', 'oe_fileupload_auto');
+            formData.append('ufile', file);
+            formData.append('model', 'tms.order');
+            formData.append('id', realId);
+            formData.append('directory_id', POD_ORDER_2_DIRECTORY_ID);
+
+            try {
+                const uploadRes = await fetch('/web/binary/upload_attachment', { method: 'POST', body: formData });
+                if (!uploadRes.ok) throw new Error(`Status: ${uploadRes.status}`);
+                successCount++;
+            } catch (err) {
+                console.error("Upload-Fehler bei", file.name, err);
+                showToast(`Fehler beim Upload von ${file.name}: ${err.message}`, { type: 'error' });
+            }
+        }
+
+        if (successCount > 0) {
+            showToast(`${successCount} Datei(en) erfolgreich zu Auftrag <b>${docNo}</b> hinzugefügt.`, { type: 'success' });
+            try {
+                const refreshRes = await fetch('/web/dataset/search_read', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jsonrpc: "2.0", method: "call",
+                        params: { model: "ir.attachment", domain: [["res_model", "=", "tms.order"], ["res_id", "=", realId]], fields: ["id", "name", "mimetype"] }
+                    })
+                });
+                const refreshData = await refreshRes.json();
+                if (refreshData.result && refreshData.result.records) {
+                    attachments.length = 0;
+                    refreshData.result.records.forEach(att => attachments.push({ id: att.id, name: att.name, mimetype: att.mimetype }));
+                }
+            } catch (e) {
+                console.warn("Konnte Anhang-Liste nach D&D nicht aktualisieren", e);
+            }
+        }
+
+        badgeEl.className = originalBadgeClass;
+        badgeEl.classList.remove('zero-attachments');
+        badgeEl.classList.add('has-attachments');
+        badgeEl.innerHTML = `<i class="fa fa-paperclip"></i> ${attachments.length}`;
+    }
+
+    function bindDragAndDrop(targetElement, docNo, realId, attachments, badgeEl) {
+        if (!targetElement || targetElement.classList.contains('tms-dnd-attached')) return;
+        targetElement.classList.add('tms-dnd-attached');
+
+        targetElement.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            targetElement.classList.add('tms-drag-over');
+        });
+
+        targetElement.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            targetElement.classList.remove('tms-drag-over');
+        });
+
+        targetElement.addEventListener('drop', (e) => {
+            e.preventDefault();
+            targetElement.classList.remove('tms-drag-over');
+
+            const files = e.dataTransfer.files;
+            if (files.length === 0) return;
+
+            handleDragAndDropUpload(files, docNo, realId, attachments, badgeEl);
+        });
+    }
+
     async function handlePreviewClick(docNo, attachments, previewBtnEl, existingMergedFile, referenceText) {
         const fileName = generateCleanFileName(docNo, referenceText);
         if (existingMergedFile) {
@@ -1095,7 +1188,7 @@
         return { container, badge, previewBtn, tagBtn, deleteBtn, mailBtn };
     }
 
-    function updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, referenceText, row) {
+    function updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, referenceText, row, dropTarget) {
         const files = orderInfo ? (orderInfo.files || []) : [];
         const realId = orderInfo ? orderInfo.realId : null;
         const tags = orderInfo ? (orderInfo.tags || []) : [];
@@ -1211,6 +1304,11 @@
                 previewBtn.innerHTML = '<i class="fa fa-frown-o"></i>';
                 setTimeout(() => { previewBtn.innerHTML = '<i class="fa fa-search"></i>'; }, 2000);
             };
+        }
+
+        // NEU: Drag & Drop an das Ziel-Element binden, sobald die realId da ist
+        if (realId && dropTarget) {
+            bindDragAndDrop(dropTarget, docNo, realId, files, badge);
         }
     }
 
@@ -1432,7 +1530,7 @@
                     const { container, badge, previewBtn, tagBtn, deleteBtn, mailBtn } = createPlaceholderUI(false);
                     targetField.parentNode.insertBefore(container, targetField);
 
-                    pendingUpdates.push({ docNo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, referenceText, row });
+                    pendingUpdates.push({ docNo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, referenceText, row, dropTarget: row });
                     if (!docNosToFetch.includes(docNo)) docNosToFetch.push(docNo);
                 }
             }
@@ -1444,7 +1542,7 @@
 
             pendingUpdates.forEach(item => {
                 const orderInfo = orderDataMap[item.docNo];
-                updatePlaceholderWithData(item.docNo, orderInfo, item.badge, item.previewBtn, item.tagBtn, item.deleteBtn, item.mailBtn, item.referenceText, item.row);
+                updatePlaceholderWithData(item.docNo, orderInfo, item.badge, item.previewBtn, item.tagBtn, item.deleteBtn, item.mailBtn, item.referenceText, item.row, item.dropTarget);
             });
         }
         isFetchingTable = false;
@@ -1495,7 +1593,7 @@
 
             const orderDataMap = await fetchAttachmentData([docNo]);
             const orderInfo = orderDataMap[docNo];
-            updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, null, null, null, referenceText, null);
+            updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, null, null, null, referenceText, null, modalContent);
         }
         isFetchingModal = false;
     }
