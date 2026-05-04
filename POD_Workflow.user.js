@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sirum: POD Workflow & Quick Tag
 // @namespace    https://github.com/BAHendrik/tms_tools
-// @version      13.4
-// @description  Quick Tag, Originale löschen, POD-Versand + Status-Anzeige + klickbare Transport-Badges.
+// @version      13.7
+// @description  Quick Tag, Originale löschen, POD-Versand, Buchhaltungsfreigabe + Status-Anzeige + klickbare Transport-Badges.
 // @author       BAHendrik
 // @match        https://coolerulogistics-production-00220.dolphins.sirum.de/*
 // @grant        none
@@ -82,6 +82,15 @@
         .tms-mail-btn.is-sent:hover {
             background: #e67e22; color: #ffffff;
             box-shadow: 0 4px 12px rgba(230, 126, 34, 0.5);
+        }
+
+        /* NEU: Spezifisch für Buchhaltungsfreigabe-Button (Dollar, lila) */
+        .tms-account-btn { color: #8e44ad; font-weight: 700; }
+        .tms-account-btn:hover { background: #8e44ad; color: #ffffff; border-color: #8e44ad; box-shadow: 0 4px 10px rgba(142, 68, 173, 0.35); }
+        .tms-account-btn.is-success {
+            background: #8e44ad; color: #ffffff; border-color: #7d3c98;
+            box-shadow: 0 2px 6px rgba(142, 68, 173, 0.35);
+            pointer-events: none;
         }
 
         /* Das Badge (links) */
@@ -356,7 +365,7 @@
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     jsonrpc: "2.0", method: "call",
-                    params: { model: "tms.order", domain: [["document_no", "in", docNos]], fields: ["id", "document_no", "category_ids"] }
+                    params: { model: "tms.order", domain: [["document_no", "in", docNos]], fields: ["id", "document_no", "category_ids", "control_point_id"] }
                 })
             });
             const orderData = await orderRes.json();
@@ -370,11 +379,14 @@
                 orderData.result.records.forEach(record => {
                     realIds.push(record.id);
                     idToDocNo[record.id] = record.document_no;
+                    // control_point_id kommt von Odoo als [id, name] oder false
+                    const cpId = Array.isArray(record.control_point_id) ? record.control_point_id[0] : (record.control_point_id || false);
                     orderDataMap[record.document_no] = {
                         realId: record.id,
                         files: [],
                         tags: record.category_ids || [],
-                        podMailSent: false
+                        podMailSent: false,
+                        controlPointId: cpId
                     };
                 });
 
@@ -533,6 +545,120 @@
             alert(`Tag konnte nicht gesetzt werden:\n\n${error.message}`);
             btnEl.innerHTML = originalHtml;
             btnEl.style.pointerEvents = 'auto';
+        }
+    }
+
+    // --- NEU: BUCHHALTUNGSFREIGABE SETZEN ---
+    // Entspricht dem manuellen Workflow: Dropdown control_point_id auf "Buchhaltungsfreigabe" (=1)
+    // Im Netzwerk wird beim manuellen Setzen ein write mit control_point_id, blocked, release abgesetzt.
+
+    // Sucht die control_point_id-Zelle in einer Zeile (mehrere Selektoren probieren)
+    function findControlPointCell(row) {
+        if (!row) return null;
+        const selectors = [
+            'span[name="control_point_id"]',
+            'td[name="control_point_id"]',
+            '[data-field="control_point_id"]',
+            '[name="control_point_id"]'
+        ];
+        for (const sel of selectors) {
+            const el = row.querySelector(sel);
+            if (el) return el;
+        }
+        return null;
+    }
+
+    // Erzwingt den deutschen Display-Namen in der Zelle und hält ihn dort.
+    // Hintergrund: Odoo aktualisiert die Zelle nach unserem write asynchron selbst
+    // ("Accounting Release" statt "Buchhaltungsfreigabe"). Wir setzen sofort, plus
+    // verzögert nochmal, plus ein MutationObserver der für 2.5s gegen Odoo-Overrides verteidigt.
+    function enforceControlPointCellText(row, targetText = 'Buchhaltungsfreigabe') {
+        const cell = findControlPointCell(row);
+        if (!cell) {
+            console.warn('Buchhaltungsfreigabe: Zelle in Zeile nicht gefunden. Reload nötig.');
+            return;
+        }
+
+        const setText = () => {
+            if (cell.innerText !== targetText) {
+                cell.innerText = targetText;
+            }
+        };
+
+        // 1) Sofort setzen
+        setText();
+
+        // 2) Mehrfach verzögert setzen (falls Odoo nach unserem Write noch eingreift)
+        setTimeout(setText, 100);
+        setTimeout(setText, 400);
+        setTimeout(setText, 1000);
+
+        // 3) MutationObserver: für 2.5s jede Fremdänderung an dieser Zelle korrigieren
+        try {
+            const observer = new MutationObserver(() => {
+                if (cell.innerText !== targetText) {
+                    cell.innerText = targetText;
+                }
+            });
+            observer.observe(cell, { childList: true, characterData: true, subtree: true });
+            setTimeout(() => observer.disconnect(), 2500);
+        } catch (err) {
+            console.warn('MutationObserver für Zelle fehlgeschlagen:', err);
+        }
+    }
+
+    async function setAccountingApproval(realId, btnEl, row) {
+        const originalHtml = btnEl.innerHTML;
+        btnEl.innerHTML = '<i class="fa fa-spinner fa-spin-fast"></i>';
+        btnEl.style.pointerEvents = 'none';
+
+        try {
+            const payload = {
+                jsonrpc: "2.0",
+                method: "call",
+                params: {
+                    args: [[realId], {
+                        control_point_id: 1,
+                        blocked: true,
+                        release: true
+                    }],
+                    model: "tms.order",
+                    method: "write",
+                    kwargs: {
+                        context: {
+                            lang: "de_DE",
+                            tz: "Europe/Berlin",
+                            default_tms_order_state: "order",
+                            manual_override: true
+                        }
+                    }
+                }
+            };
+
+            const res = await fetch('/web/dataset/call_kw/tms.order/write', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.data ? data.error.data.message : 'write fehlgeschlagen');
+
+            // Zellen-Text in der Zeile auf "Buchhaltungsfreigabe" zwingen
+            // (verteidigt für 2.5s gegen Odoos Override mit "Accounting Release")
+            if (row) {
+                enforceControlPointCellText(row, 'Buchhaltungsfreigabe');
+            }
+
+            btnEl.innerHTML = '$';
+            btnEl.classList.add('is-success');
+            btnEl.title = "Buchhaltungsfreigabe gesetzt!";
+            return true;
+        } catch (error) {
+            console.error(error);
+            alert(`Buchhaltungsfreigabe konnte nicht gesetzt werden:\n\n${error.message}`);
+            btnEl.innerHTML = originalHtml;
+            btnEl.style.pointerEvents = 'auto';
+            return false;
         }
     }
 
@@ -1177,21 +1303,28 @@
         mailBtn.className = 'tms-action-btn tms-mail-btn is-fetching';
         mailBtn.innerHTML = '<i class="fa fa-circle-o-notch fa-spin-fast" style="font-size: 0.8em"></i>';
 
+        // NEU: Platzhalter für den Buchhaltungsfreigabe-Button (lila $)
+        const accountBtn = document.createElement('span');
+        accountBtn.className = 'tms-action-btn tms-account-btn is-fetching';
+        accountBtn.innerHTML = '<i class="fa fa-circle-o-notch fa-spin-fast" style="font-size: 0.8em"></i>';
+
         container.appendChild(badge);
         container.appendChild(previewBtn);
         if (!isModal) {
             container.appendChild(tagBtn);
             container.appendChild(deleteBtn);
             container.appendChild(mailBtn);
+            container.appendChild(accountBtn);
         }
 
-        return { container, badge, previewBtn, tagBtn, deleteBtn, mailBtn };
+        return { container, badge, previewBtn, tagBtn, deleteBtn, mailBtn, accountBtn };
     }
 
-    function updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, referenceText, row, dropTarget) {
+    function updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, accountBtn, referenceText, row, dropTarget) {
         const files = orderInfo ? (orderInfo.files || []) : [];
         const realId = orderInfo ? orderInfo.realId : null;
         const tags = orderInfo ? (orderInfo.tags || []) : [];
+        const controlPointId = orderInfo ? orderInfo.controlPointId : false;
 
         const count = files.length;
         const existingMergedFile = files.find(f => f.name.includes(`${docNo}_POD`));
@@ -1266,6 +1399,26 @@
             } else {
                 mailBtn.classList.add('is-disabled');
                 mailBtn.title = realId ? 'Keine Anhänge zum Versenden vorhanden' : 'Auftrag nicht gefunden';
+            }
+        }
+
+        // NEU: Logik für den Buchhaltungsfreigabe-Button (lila $)
+        if (accountBtn) {
+            accountBtn.className = 'tms-action-btn tms-account-btn';
+            accountBtn.innerHTML = '$';
+
+            if (controlPointId === 1) {
+                // Buchhaltungsfreigabe ist bereits gesetzt
+                accountBtn.classList.add('is-success');
+                accountBtn.title = "Buchhaltungsfreigabe (bereits gesetzt)";
+            } else if (realId) {
+                accountBtn.title = "Buchhaltungsfreigabe setzen";
+                accountBtn.onclick = (e) => {
+                    e.stopPropagation(); e.preventDefault();
+                    setAccountingApproval(realId, accountBtn, row);
+                };
+            } else {
+                accountBtn.style.display = 'none';
             }
         }
 
@@ -1527,10 +1680,10 @@
                     const refField = row.querySelector('span[name="client_order_ref"]');
                     const referenceText = refField ? refField.innerText.trim() : "";
 
-                    const { container, badge, previewBtn, tagBtn, deleteBtn, mailBtn } = createPlaceholderUI(false);
+                    const { container, badge, previewBtn, tagBtn, deleteBtn, mailBtn, accountBtn } = createPlaceholderUI(false);
                     targetField.parentNode.insertBefore(container, targetField);
 
-                    pendingUpdates.push({ docNo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, referenceText, row, dropTarget: row });
+                    pendingUpdates.push({ docNo, badge, previewBtn, tagBtn, deleteBtn, mailBtn, accountBtn, referenceText, row, dropTarget: row });
                     if (!docNosToFetch.includes(docNo)) docNosToFetch.push(docNo);
                 }
             }
@@ -1542,7 +1695,7 @@
 
             pendingUpdates.forEach(item => {
                 const orderInfo = orderDataMap[item.docNo];
-                updatePlaceholderWithData(item.docNo, orderInfo, item.badge, item.previewBtn, item.tagBtn, item.deleteBtn, item.mailBtn, item.referenceText, item.row, item.dropTarget);
+                updatePlaceholderWithData(item.docNo, orderInfo, item.badge, item.previewBtn, item.tagBtn, item.deleteBtn, item.mailBtn, item.accountBtn, item.referenceText, item.row, item.dropTarget);
             });
         }
         isFetchingTable = false;
@@ -1593,7 +1746,7 @@
 
             const orderDataMap = await fetchAttachmentData([docNo]);
             const orderInfo = orderDataMap[docNo];
-            updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, null, null, null, referenceText, null, modalContent);
+            updatePlaceholderWithData(docNo, orderInfo, badge, previewBtn, null, null, null, null, referenceText, null, modalContent);
         }
         isFetchingModal = false;
     }
